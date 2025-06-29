@@ -289,4 +289,134 @@ for comm_id, topic_info in list(comm_topics.items())[:8]:
     for j, topic_keywords in enumerate(topic_info['topics'][:2]):
         print(f"  Topic {j+1}: {', '.join(topic_keywords[:3])}")
 
+
+# Visualization
+
+
+# =============================================================================
+# COIN model analysis
+# =============================================================================
+
+# Create mapping from paper ID to year and community
+paper_to_year = dict(zip(dates_df['paper_id'], dates_df['year']))
+paper_to_community = comms
+years = sorted(dates_df['year'].dropna().unique())
+
+print(f"Time range: {min(years)} - {max(years)}")
+print(f"Total papers with year info: {len(paper_to_year)}")
+print(f"Papers in communities: {len(paper_to_community)}")
+
+def calculate_coin_metrics(year_start, year_end, citation_graph, paper_to_year, paper_to_community):
+    """Calculate COIN metrics for each community in given time window"""
+    # Filter edges within time window
+    edges_in_window = []
+    for source, target in citation_graph.edges():
+        source_year = paper_to_year.get(source)
+        if source_year and year_start <= source_year <= year_end:
+            edges_in_window.append((source, target))
     
+    print(f"\nProcessing {len(edges_in_window)} edges in window {year_start}-{year_end}")
+
+    # Initialize COIN metrics storage
+    community_metrics = defaultdict(lambda: {
+        'introspection': 0,
+        'inflow': 0,
+        'outflow': 0,
+        'total_papers': 0,
+        'total_citations': 0
+    })
+
+    # Count papers per community in window
+    for paper_id, year in paper_to_year.items():
+        if year_start <= year <= year_end and paper_id in paper_to_community:
+            comm_id = paper_to_community[paper_id]
+            community_metrics[comm_id]['total_papers'] += 1
+
+    # Analyze citation relationships
+    for source, target in edges_in_window:
+        if source in paper_to_community and target in paper_to_community:
+            source_comm = paper_to_community[source]
+            target_comm = paper_to_community[target]
+            
+            community_metrics[source_comm]['total_citations'] += 1
+            
+            if source_comm == target_comm:
+                community_metrics[source_comm]['introspection'] += 1
+            else:
+                community_metrics[source_comm]['outflow'] += 1
+                community_metrics[target_comm]['inflow'] += 1
+
+    # Calculate COIN ratios
+    for comm_id in community_metrics:
+        metrics = community_metrics[comm_id]
+        total_cit = metrics['total_citations']
+        
+        if total_cit > 0:
+            metrics['introspection_ratio'] = metrics['introspection'] / total_cit
+            metrics['inflow_ratio'] = metrics['inflow'] / total_cit
+            metrics['outflow_ratio'] = metrics['outflow'] / total_cit
+        else:
+            metrics['introspection_ratio'] = 0
+            metrics['inflow_ratio'] = 0
+            metrics['outflow_ratio'] = 0
+            
+        # 计算影响力指数
+        metrics['influence_score'] = metrics['total_papers'] + metrics['inflow'] * 0.5
+        
+    return dict(community_metrics)
+
+# Simple test
+test_edges = [
+    ('p1', 'p2'), ('p2', 'p1'),  # Community A introspection
+    ('p3', 'p4'),               # Community B introspection
+    ('p3', 'p1'),               # B->A (B outflow, A inflow)
+]
+
+test_paper_to_year = {'p1': 2000, 'p2': 2000, 'p3': 2000, 'p4': 2000}
+test_paper_to_community = {'p1': 'A', 'p2': 'A', 'p3': 'B', 'p4': 'B'}
+
+test_graph = nx.DiGraph()
+test_graph.add_edges_from(test_edges)
+
+print(f"\nTest data: {len(test_edges)} citations")
+print(f"Community A: p1,p2  Community B: p3,p4")
+print(f"Citation relationships: {test_edges}")
+
+# Run test
+results = calculate_coin_metrics(2000, 2000, test_graph, test_paper_to_year, test_paper_to_community)
+
+for comm, metrics in results.items():
+    print(f"Community {comm}: papers={metrics['total_papers']}, "
+          f"introspection={metrics['introspection']}, inflow={metrics['inflow']}, outflow={metrics['outflow']}")
+
+# Test visualization
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+
+pos = {'p1': (0, 1), 'p2': (0, 0), 'p3': (2, 1), 'p4': (2, 0)}
+colors = ['lightblue', 'lightblue', 'lightgreen', 'lightgreen']
+nx.draw(test_graph, pos, ax=ax1, node_color=colors, with_labels=True, arrows=True)
+ax1.set_title('Citation Network (Community A=blue, B=green)')
+
+# COIN metrics comparison
+communities = list(results.keys())
+introspection = [results[i]['introspection'] for i in communities]
+inflow = [results[i]['inflow'] for i in communities]
+outflow = [results[i]['outflow'] for i in communities]
+
+x = range(len(communities))
+ax2.bar([i-0.2 for i in x], introspection, 0.2, label='introspection', alpha=0.7)
+ax2.bar(x, inflow, 0.2, label='inflow', alpha=0.7)  
+ax2.bar([i+0.2 for i in x], outflow, 0.2, label='outflow', alpha=0.7)
+ax2.set_xticks(x)
+ax2.set_xticklabels(communities)
+ax2.legend()
+ax2.set_title('COIN Metrics')
+
+plt.tight_layout()
+plt.show()
+
+print(f"\nvalidation:")
+print(f"Community A introspection (p1<->p2): {results['A']['introspection'] == 2}")
+print(f"Community A inflow (p3->p1): {results['A']['inflow'] == 1}")  
+print(f"Community B outflow (p3->p1): {results['B']['outflow'] == 1}")
+print(f"COIN ratio sums: A={results['A']['introspection_ratio'] + results['A']['inflow_ratio']:.2f}, B={results['B']['outflow_ratio']:.2f}")

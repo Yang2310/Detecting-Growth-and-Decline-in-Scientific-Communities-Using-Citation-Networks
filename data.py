@@ -5,18 +5,15 @@ import os
 cit_df = pd.read_csv(
     "data/cit-HepTh.txt",
     sep="\t",
+    comment='#',
     header=None,
-    names=["source", "target"]
+    names=["source", "target"],
+    dtype={"source": str, "target": str}
 )
 
-# Loading submission time
-dates_df = pd.read_csv(
-    "data/cit-HepTh-dates.txt",
-    sep="\t",
-    header=None,
-    names=["paper_id", "date"]
-)
-dates_df["year"] = pd.to_datetime(dates_df["date"]).dt.year
+# Conversion to 7-digit format
+cit_df["source"] = cit_df["source"].str.strip().str.zfill(7)
+cit_df["target"] = cit_df["target"].str.strip().str.zfill(7)
 
 # Loading metadata
 def load_abstracts(root_dir):
@@ -34,7 +31,7 @@ def load_abstracts(root_dir):
             # Traverse all .abs files in this year directory
             for filename in os.listdir(year_path):
                 if filename.endswith(".abs"):
-                    paper_id = filename.split(".")[0]
+                    paper_id = filename.split(".")[0].zfill(7)
                     file_path = os.path.join(year_path, filename)
 
                     # Read file content
@@ -90,7 +87,19 @@ def load_abstracts(root_dir):
     return pd.DataFrame(metadata)
 
 metadata_df = load_abstracts("data/cit-HepTh-abstracts")
-print(f"Successfully loaded {len(metadata_df)} records")
+
+# Create set of valid IDs
+valid_ids = set(metadata_df['paper_id'])
+print(f"Number of valid paper IDs: {len(valid_ids)}")
+
+# Filter citations to only include valid IDs
+original_edges = len(cit_df)
+cit_df = cit_df[
+    cit_df["source"].isin(valid_ids) & 
+    cit_df["target"].isin(valid_ids)
+]
+print(f"Filtered citations: Original {original_edges} → Remaining {len(cit_df)} ({len(cit_df)/original_edges:.1%})")
+
 print("\nFirst few record titles:")
 for i in range(min(3, len(metadata_df))):
     print(f"{i+1}. {metadata_df.iloc[i]['title']}")
@@ -103,7 +112,7 @@ import networkx as nx
 # Build the base citation network
 G = nx.from_pandas_edgelist(cit_df, 'source', 'target', create_using=nx.DiGraph())
 
-# Plot basic network statistics
+#Plot basic network statistics
 plt.figure(figsize=(12, 4))
 
 # Subplot 1: Number of nodes and edges
@@ -133,15 +142,9 @@ plt.tight_layout()
 plt.show()
 
 
-# Consolidation of all time data
-combined_years = pd.concat([
-    dates_df["year"],
-    metadata_df["year"]
-]).dropna()
-
 # Plotting time distribution histograms
 plt.figure(figsize=(10, 5))
-plt.hist(combined_years, bins=range(1992, 2004), edgecolor='black', align='left')
+plt.hist(metadata_df['year'], bins=range(1992, 2004), edgecolor='black', align='left')
 plt.xticks(range(1992, 2004))
 plt.xlabel('Year')
 plt.ylabel('Number of Papers')
@@ -298,13 +301,52 @@ for comm_id, topic_info in list(comm_topics.items())[:8]:
 # =============================================================================
 
 # Create mapping from paper ID to year and community
-paper_to_year = dict(zip(dates_df['paper_id'], dates_df['year']))
+paper_to_year = dict(zip(metadata_df['paper_id'], metadata_df['year']))
 paper_to_community = comms
-years = sorted(dates_df['year'].dropna().unique())
+years = sorted(metadata_df['year'].dropna().unique())
 
-print(f"Time range: {min(years)} - {max(years)}")
+print(f"\nTime range: {min(years)} - {max(years)}")
 print(f"Total papers with year info: {len(paper_to_year)}")
 print(f"Papers in communities: {len(paper_to_community)}")
+
+print("\nData Integrity Check")
+
+# 1. Basic statistics
+print(f"Total nodes in citation network: {len(G.nodes):,}")
+print(f"Total edges in citation network: {len(G.edges):,}")
+print(f"Year data entries: {len(paper_to_year):,}")
+print(f"Community data entries: {len(paper_to_community):,}")
+
+# 2. ID format check
+print(f"\nID Format Samples:")
+print(f"Citation network node samples: {list(G.nodes)[:5]}")
+print(f"Year data ID samples: {list(paper_to_year.keys())[:5]}")
+print(f"Community data ID samples: {list(paper_to_community.keys())[:5]}")
+
+# 3. Intersection analysis
+network_nodes = set(G.nodes)
+year_nodes = set(paper_to_year.keys())
+community_nodes = set(paper_to_community.keys())
+
+print(f"\nData Intersection Analysis:")
+print(f"Network ∩ Year data: {len(network_nodes & year_nodes):,} ({len(network_nodes & year_nodes)/len(network_nodes):.1%})")
+print(f"Network ∩ Community data: {len(network_nodes & community_nodes):,} ({len(network_nodes & community_nodes)/len(network_nodes):.1%})")
+print(f"Year data ∩ Community data: {len(year_nodes & community_nodes):,}")
+
+# 4. Missing data analysis
+missing_years = network_nodes - year_nodes
+missing_communities = network_nodes - community_nodes
+
+print(f"\nMissing Data Samples:")
+print(f"Nodes missing year information: {list(missing_years)[:10]}")
+print(f"Nodes missing community information: {list(missing_communities)[:10]}")
+
+# 5. Year distribution check
+print(f"\nYear Distribution:")
+year_counts = pd.Series(list(paper_to_year.values())).value_counts().sort_index()
+for year, count in year_counts.items():
+    print(f"  {year}: {count:,} papers")
+
 
 def calculate_coin_metrics(year_start, year_end, citation_graph, paper_to_year, paper_to_community):
     """Calculate COIN metrics for each community in given time window"""
@@ -365,58 +407,100 @@ def calculate_coin_metrics(year_start, year_end, citation_graph, paper_to_year, 
         
     return dict(community_metrics)
 
-# Simple test
-test_edges = [
-    ('p1', 'p2'), ('p2', 'p1'),  # Community A introspection
-    ('p3', 'p4'),               # Community B introspection
-    ('p3', 'p1'),               # B->A (B outflow, A inflow)
-]
+# # Simple test
+# test_edges = [
+#     ('p1', 'p2'), ('p2', 'p1'),  # Community A introspection
+#     ('p3', 'p4'),               # Community B introspection
+#     ('p3', 'p1'),               # B->A (B outflow, A inflow)
+# ]
 
-test_paper_to_year = {'p1': 2000, 'p2': 2000, 'p3': 2000, 'p4': 2000}
-test_paper_to_community = {'p1': 'A', 'p2': 'A', 'p3': 'B', 'p4': 'B'}
+# test_paper_to_year = {'p1': 2000, 'p2': 2000, 'p3': 2000, 'p4': 2000}
+# test_paper_to_community = {'p1': 'A', 'p2': 'A', 'p3': 'B', 'p4': 'B'}
 
-test_graph = nx.DiGraph()
-test_graph.add_edges_from(test_edges)
+# test_graph = nx.DiGraph()
+# test_graph.add_edges_from(test_edges)
 
-print(f"\nTest data: {len(test_edges)} citations")
-print(f"Community A: p1,p2  Community B: p3,p4")
-print(f"Citation relationships: {test_edges}")
+# print(f"\nTest data: {len(test_edges)} citations")
+# print(f"Community A: p1,p2  Community B: p3,p4")
+# print(f"Citation relationships: {test_edges}")
 
-# Run test
-results = calculate_coin_metrics(2000, 2000, test_graph, test_paper_to_year, test_paper_to_community)
+# # Run test
+# results = calculate_coin_metrics(2000, 2000, test_graph, test_paper_to_year, test_paper_to_community)
 
-for comm, metrics in results.items():
-    print(f"Community {comm}: papers={metrics['total_papers']}, "
-          f"introspection={metrics['introspection']}, inflow={metrics['inflow']}, outflow={metrics['outflow']}")
+# for comm, metrics in results.items():
+#     print(f"Community {comm}: papers={metrics['total_papers']}, "
+#           f"introspection={metrics['introspection']}, inflow={metrics['inflow']}, outflow={metrics['outflow']}")
 
-# Test visualization
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+# # Test visualization
+# fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
 
-pos = {'p1': (0, 1), 'p2': (0, 0), 'p3': (2, 1), 'p4': (2, 0)}
-colors = ['lightblue', 'lightblue', 'lightgreen', 'lightgreen']
-nx.draw(test_graph, pos, ax=ax1, node_color=colors, with_labels=True, arrows=True)
-ax1.set_title('Citation Network (Community A=blue, B=green)')
+# pos = {'p1': (0, 1), 'p2': (0, 0), 'p3': (2, 1), 'p4': (2, 0)}
+# colors = ['lightblue', 'lightblue', 'lightgreen', 'lightgreen']
+# nx.draw(test_graph, pos, ax=ax1, node_color=colors, with_labels=True, arrows=True)
+# ax1.set_title('Citation Network (Community A=blue, B=green)')
 
-# COIN metrics comparison
-communities = list(results.keys())
-introspection = [results[i]['introspection'] for i in communities]
-inflow = [results[i]['inflow'] for i in communities]
-outflow = [results[i]['outflow'] for i in communities]
+# # COIN metrics comparison
+# communities = list(results.keys())
+# introspection = [results[i]['introspection'] for i in communities]
+# inflow = [results[i]['inflow'] for i in communities]
+# outflow = [results[i]['outflow'] for i in communities]
 
-x = range(len(communities))
-ax2.bar([i-0.2 for i in x], introspection, 0.2, label='introspection', alpha=0.7)
-ax2.bar(x, inflow, 0.2, label='inflow', alpha=0.7)  
-ax2.bar([i+0.2 for i in x], outflow, 0.2, label='outflow', alpha=0.7)
-ax2.set_xticks(x)
-ax2.set_xticklabels(communities)
-ax2.legend()
-ax2.set_title('COIN Metrics')
+# x = range(len(communities))
+# ax2.bar([i-0.2 for i in x], introspection, 0.2, label='introspection', alpha=0.7)
+# ax2.bar(x, inflow, 0.2, label='inflow', alpha=0.7)  
+# ax2.bar([i+0.2 for i in x], outflow, 0.2, label='outflow', alpha=0.7)
+# ax2.set_xticks(x)
+# ax2.set_xticklabels(communities)
+# ax2.legend()
+# ax2.set_title('COIN Metrics')
 
-plt.tight_layout()
-plt.show()
+# plt.tight_layout()
+# plt.show()
 
-print(f"\nvalidation:")
-print(f"Community A introspection (p1<->p2): {results['A']['introspection'] == 2}")
-print(f"Community A inflow (p3->p1): {results['A']['inflow'] == 1}")  
-print(f"Community B outflow (p3->p1): {results['B']['outflow'] == 1}")
-print(f"COIN ratio sums: A={results['A']['introspection_ratio'] + results['A']['inflow_ratio']:.2f}, B={results['B']['outflow_ratio']:.2f}")
+# print(f"\nvalidation:")
+# print(f"Community A introspection (p1<->p2): {results['A']['introspection'] == 2}")
+# print(f"Community A inflow (p3->p1): {results['A']['inflow'] == 1}")  
+# print(f"Community B outflow (p3->p1): {results['B']['outflow'] == 1}")
+# print(f"COIN ratio sums: A={results['A']['introspection_ratio'] + results['A']['inflow_ratio']:.2f}, B={results['B']['outflow_ratio']:.2f}")
+
+# Perform temporal window analysis
+print("\nPerforming temporal analysis with 2-year sliding windows...")
+window_size = 2
+temporal_data = []
+min_year = int(min(years))
+max_year = int(max(years))
+
+for start_year in range(min_year, max_year - window_size + 2):
+    end_year = start_year + window_size - 1
+    if end_year > max_year:
+        break
+        
+    # Get COIN metrics for this time window
+    coin_metrics = calculate_coin_metrics(start_year, end_year, G, paper_to_year, paper_to_community)
+    
+    # Only analyze communities with sufficient activity
+    active_communities = 0
+    for comm_id, metrics in coin_metrics.items():
+        if metrics['total_papers'] >= 5:
+            active_communities += 1
+            temporal_data.append({
+                'community': comm_id,
+                'year_start': start_year,
+                'year_end': end_year,
+                'window_center': (start_year + end_year) / 2,
+                'total_papers': metrics['total_papers'],
+                'total_citations': metrics['total_citations'],
+                'introspection': metrics['introspection'],
+                'inflow': metrics['inflow'],
+                'outflow': metrics['outflow'],
+                'introspection_ratio': metrics['introspection_ratio'],
+                'inflow_ratio': metrics['inflow_ratio'],
+                'outflow_ratio': metrics['outflow_ratio'],
+                'influence_score': metrics['influence_score']
+            })
+    
+    print(f"  Window {start_year}-{end_year}: {active_communities} active communities")
+
+temporal_df = pd.DataFrame(temporal_data)
+print(f"Generated temporal analysis with {len(temporal_df)} data points")
+print(f"Unique communities tracked: {temporal_df['community'].nunique()}")

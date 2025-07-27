@@ -1,5 +1,13 @@
 import pandas as pd
+import numpy as np
 import os
+import matplotlib.pyplot as plt
+import networkx as nx
+import community as community_louvain
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.decomposition import LatentDirichletAllocation
+from collections import defaultdict, Counter
+
 
 # Loading reference relationships
 cit_df = pd.read_csv(
@@ -11,9 +19,8 @@ cit_df = pd.read_csv(
     dtype={"source": str, "target": str}
 )
 
-# Conversion to 7-digit format
-cit_df["source"] = cit_df["source"].str.strip().str.zfill(7)
-cit_df["target"] = cit_df["target"].str.strip().str.zfill(7)
+cit_df["source"] = cit_df["source"].str.strip()
+cit_df["target"] = cit_df["target"].str.strip()
 
 # Loading metadata
 def load_abstracts(root_dir):
@@ -31,7 +38,8 @@ def load_abstracts(root_dir):
             # Traverse all .abs files in this year directory
             for filename in os.listdir(year_path):
                 if filename.endswith(".abs"):
-                    paper_id = filename.split(".")[0].zfill(7)
+                    # Remove leading zeros from paper ID
+                    paper_id = filename.split(".")[0].strip().lstrip('0')
                     file_path = os.path.join(year_path, filename)
 
                     # Read file content
@@ -106,9 +114,6 @@ for i in range(min(3, len(metadata_df))):
 
 
 
-import matplotlib.pyplot as plt
-import networkx as nx
-
 # Build the base citation network
 G = nx.from_pandas_edgelist(cit_df, 'source', 'target', create_using=nx.DiGraph())
 
@@ -157,7 +162,6 @@ plt.show()
 # =============================================================================
 # Community Detection
 # =============================================================================
-import community as community_louvain
 
 # Convert to undirected graph for community detection
 G_undir = G.to_undirected()
@@ -187,9 +191,7 @@ for i, (cid, size) in enumerate(sorted_comms[:5]):
 # =============================================================================
 # Thematic analysis
 # =============================================================================
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.decomposition import LatentDirichletAllocation
-from collections import defaultdict, Counter
+
 
 # Create mapping from communities to papers
 comm_papers = defaultdict(list)
@@ -504,3 +506,54 @@ for start_year in range(min_year, max_year - window_size + 2):
 temporal_df = pd.DataFrame(temporal_data)
 print(f"Generated temporal analysis with {len(temporal_df)} data points")
 print(f"Unique communities tracked: {temporal_df['community'].nunique()}")
+
+
+# =============================================================================
+# Community Classification
+# =============================================================================
+
+def classify_community(comm_data):
+    if len(comm_data) < 3:
+        return ['Insufficient Data']
+    
+    # Calculate core metrics
+    time_points = comm_data['window_center'].values
+    papers = comm_data['total_papers'].values
+    intro = comm_data['introspection_ratio'].values
+    outflow = comm_data['outflow_ratio'].values
+    
+    # Use weighted least squares 
+    paper_slope = np.polyfit(time_points, papers, 1, w=np.sqrt(papers))[0]
+    intro_slope = np.polyfit(time_points, intro, 1, w=np.sqrt(papers))[0]
+    outflow_slope = np.polyfit(time_points, outflow, 1, w=np.sqrt(papers))[0]
+    
+    # Calculate key ratios 
+    safe_ratio = lambda a, b: a/(b+1e-6)  # Avoid division by zero
+    avg_intro_outflow = np.mean([safe_ratio(i, o) for i, o in zip(intro, outflow)])
+    recent_ratio = safe_ratio(intro[-1], outflow[-1])
+    
+    # Core role classification
+    classifications = []
+    
+    if np.median(outflow) > 0.35 and np.median(intro) > 0.25:
+        classifications.append('Exporter')
+    
+    if np.median(comm_data['inflow_ratio']) > 0.35 and np.median(intro) < 0.35:
+        classifications.append('Hub')
+    
+    if avg_intro_outflow > 1.4 or recent_ratio > 1.6:
+        classifications.append('Insular')
+    
+    # Status classification
+    if paper_slope > 0.4:
+        classifications.append('Growing')
+    elif paper_slope < -0.25:
+        classifications.append('Declining')
+    
+    if intro_slope > 0.08 and outflow_slope < -0.08:
+        classifications.append('Stagnating')
+    elif outflow_slope > 0.1 and intro_slope < 0.05:
+        classifications.append('Opening')
+    
+    return classifications if classifications else ['Stable']
+

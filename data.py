@@ -4,7 +4,8 @@ import os
 import matplotlib.pyplot as plt
 import networkx as nx
 import seaborn as sns
-import community as community_louvain
+import leidenalg
+from igraph import Graph
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.decomposition import LatentDirichletAllocation
 from collections import defaultdict, Counter
@@ -67,15 +68,16 @@ def load_abstracts(root_dir):
                             break
                     
                     # Parse abstract
-                    abstract_started = False
+                    separator_count = 0
                     abstract_lines = []
                     for line in lines:
                         if line.strip() == "\\\\":
-                            abstract_started = True
-                            continue
-                        if abstract_started:
-                            if line.strip() == "\\\\":  # 摘要结束标志
+                            separator_count += 1
+                            if separator_count == 3:
                                 break
+                            continue 
+
+                        if separator_count == 2:
                             abstract_lines.append(line.strip())
                     
                     abstract = " ".join(abstract_lines).strip()
@@ -112,8 +114,12 @@ print(f"Filtered citations: Original {original_edges} → Remaining {len(cit_df)
 print("\nFirst few record titles:")
 for i in range(min(3, len(metadata_df))):
     print(f"{i+1}. {metadata_df.iloc[i]['title']}")
+    print(f"{metadata_df.iloc[i]['abstract']}\n")
 
-
+# Create results directory if it doesn't exist
+if not os.path.exists("results"):
+    os.makedirs("results")
+    print("Created results directory")
 
 # Build the base citation network
 G = nx.from_pandas_edgelist(cit_df, 'source', 'target', create_using=nx.DiGraph())
@@ -145,18 +151,22 @@ plt.pie([self_loops, total_edges-self_loops],
 plt.title("Self-citation Ratio")
 
 plt.tight_layout()
-plt.show()
+plt.savefig("results/network_statistics.png", dpi=300, bbox_inches='tight')
+plt.close()
+print("Saved network_statistics.png in results directory")
 
 
 # Plotting time distribution histograms
 plt.figure(figsize=(10, 5))
-plt.hist(metadata_df['year'], bins=range(1992, 2004), edgecolor='black', align='left')
+plt.hist(metadata_df['year'], bins=range(1992, 2005), edgecolor='black', align='left')
 plt.xticks(range(1992, 2004))
 plt.xlabel('Year')
 plt.ylabel('Number of Papers')
 plt.title('Temporal Distribution of Papers')
 plt.grid(axis='y', alpha=0.75)
-plt.show()
+plt.savefig("results/paper_temporal_distribution.png", dpi=300, bbox_inches='tight')
+plt.close()
+print("Saved paper_temporal_distribution.png in results directory")
 
 
 
@@ -168,7 +178,23 @@ plt.show()
 G_undir = G.to_undirected()
 G_undir.remove_edges_from(nx.selfloop_edges(G_undir))
 
-comms = community_louvain.best_partition(G_undir, resolution=1.0)
+edges = list(G_undir.edges())
+g_igraph = Graph.TupleList(edges, directed=False)
+
+# Run Leiden algorithm
+partition = leidenalg.find_partition(
+    g_igraph, 
+    leidenalg.ModularityVertexPartition,
+    n_iterations=5,            # Increase iterations to improve quality
+    seed=42                    # Fix random seed for reproducibility
+)
+
+# Create community mapping dictionary
+comms = {}
+for i, community in enumerate(partition):
+    for node_id in community:
+        node_name = g_igraph.vs[node_id]['name']
+        comms[node_name] = i
 
 # Analyze community statistics
 comm_sizes = {}
@@ -187,6 +213,54 @@ for i, (cid, size) in enumerate(sorted_comms[:5]):
    print(f"  Community {cid}: {size} nodes")
 
 # Visualization
+# Define size bins
+size_bins = [
+    (1, 5, "1-5"),
+    (6, 10, "6-10"), 
+    (11, 50, "11-50"),
+    (50, 150, "50-200"),
+    (150, 500, "150-500"),
+    (500, float('inf'), "500+")
+]
+
+# Count communities in each size range
+size_distribution = []
+for min_size, max_size, label in size_bins:
+    if max_size == float('inf'):
+        count = sum(1 for size in comm_sizes.values() if size >= min_size)
+    else:
+        count = sum(1 for size in comm_sizes.values() if min_size <= size <= max_size)
+    
+    percentage = count / len(comm_sizes) * 100
+    size_distribution.append({
+        'range': label,
+        'count': count,
+        'percentage': percentage
+    })
+
+# Convert to DataFrame
+size_dist_df = pd.DataFrame(size_distribution)
+
+# Create visualization
+plt.figure(figsize=(10, 6))
+bars = plt.bar(size_dist_df['range'], size_dist_df['count'], 
+               color='skyblue', edgecolor='navy', alpha=0.7)
+
+# Add count and percentage labels on each bar
+for i, bar in enumerate(bars):
+    height = bar.get_height()
+    plt.text(bar.get_x() + bar.get_width()/2., height + 0.5,
+             f'{int(height)}\n({size_dist_df.iloc[i]["percentage"]:.1f}%)', 
+             ha='center', va='bottom', fontsize=10, fontweight='bold')
+
+plt.xlabel('Community Size (nodes)')
+plt.ylabel('Number of Communities')
+plt.title('Distribution of Community Sizes')
+plt.grid(axis='y', alpha=0.3)
+plt.tight_layout()
+plt.savefig("results/community_size_distribution.png", dpi=300, bbox_inches='tight')
+plt.close()
+print("Saved community size distribution to results/community_size_distribution.png")
 
 
 # =============================================================================
@@ -281,7 +355,7 @@ def extract_comm_topics(comm_id, paper_ids, metadata_df, n_topics=3):
 comm_topics = {}
 major_communities = sorted(comm_papers.items(), key=lambda x: len(x[1]), reverse=True)
 
-for i, (comm_id, paper_ids) in enumerate(major_communities[:15]):  # Analyze top 15 largest communities
+for i, (comm_id, paper_ids) in enumerate(major_communities[:20]):  # Analyze top 15 largest communities
     topic_result = extract_comm_topics(comm_id, paper_ids, metadata_df)
     if topic_result:
         comm_topics[comm_id] = topic_result
@@ -297,6 +371,78 @@ for comm_id, topic_info in list(comm_topics.items())[:8]:
 
 
 # Visualization
+# Select the top 15 largest communities for visualization
+top_comm_ids = [cid for cid, _ in sorted_comms[:20]]
+
+# Create community graph
+G_comm = nx.Graph()
+
+# Add community nodes
+for comm_id in top_comm_ids:
+    if comm_id in comm_topics:
+        keywords = comm_topics[comm_id]['community_keywords'][:3]
+        label = f"C{comm_id}: " + ", ".join(keywords)
+        node_size = comm_topics[comm_id]['num_papers'] * 0.5  # Adjust node size based on community size
+        G_comm.add_node(comm_id, label=label, size=node_size)
+
+# Add edges between communities (based on cross-community citations)
+for source, target in G.edges():
+    if source in comms and target in comms:
+        comm_source = comms[source]
+        comm_target = comms[target]
+        if comm_source != comm_target and comm_source in top_comm_ids and comm_target in top_comm_ids:
+            if G_comm.has_edge(comm_source, comm_target):
+                G_comm[comm_source][comm_target]['weight'] += 1
+            else:
+                G_comm.add_edge(comm_source, comm_target, weight=1)
+
+# Skip visualization if too few edges
+if G_comm.number_of_edges() < 5:
+    print("Warning: Too few edges between top communities. Skipping visualization.")
+else:
+    plt.figure(figsize=(20, 15))
+    pos = nx.spring_layout(G_comm, seed=42, k=0.5)  # Layout algorithm
+    
+    # Node sizes and colors
+    node_sizes = [G_comm.nodes[node]['size'] for node in G_comm.nodes()]
+    node_colors = [hash(node) % 30 for node in G_comm.nodes()]  # Generate different colors for communities
+    
+    # Draw nodes
+    nx.draw_networkx_nodes(
+        G_comm, pos, 
+        node_size=node_sizes,
+        node_color=node_colors,
+        cmap=plt.cm.tab20,
+        alpha=0.8
+    )
+    
+    # Draw edges (width based on citation count)
+    edge_weights = [G_comm[u][v]['weight'] * 0.002 for u, v in G_comm.edges()]
+    nx.draw_networkx_edges(
+        G_comm, pos, 
+        width=edge_weights,
+        edge_color='gray',
+        alpha=0.6
+    )
+    
+    # Add node labels (community ID and topics)
+    labels = {node: G_comm.nodes[node]['label'] for node in G_comm.nodes()}
+    nx.draw_networkx_labels(
+        G_comm, pos, 
+        labels=labels,
+        font_size=6,
+        font_family='sans-serif',
+        bbox=dict(boxstyle="round,pad=0.3", fc="white", alpha=0.8)
+    )
+    
+    # Add graph title
+    plt.title("Community Network with Topical Labels", fontsize=16)
+    plt.axis('off')
+    plt.tight_layout()
+    plt.savefig("results/community_network.png", dpi=300)
+    plt.show()
+    print("Saved community_network.png in results directory")
+
 
 
 # =============================================================================
@@ -543,6 +689,7 @@ def identify_bridge_communities(flow_matrix, comm_ids, comm_topics):
 print("\nPerforming temporal analysis with 2-year sliding windows...")
 window_size = 2
 temporal_data = []
+all_community_ids = set(comms.values())
 min_year = int(min(years))
 max_year = int(max(years))
 
@@ -566,42 +713,53 @@ for start_year in range(min_year, max_year - window_size + 2):
     flow_matrices[(start_year, end_year)] = flow_matrix
 
 
-    # Only analyze communities with sufficient activity
-    active_communities = 0
-    for comm_id, metrics in coin_metrics.items():
-        if metrics['node_count'] >= 5:
-            active_communities += 1
+    active_communities_count = 0
+    for comm_id in all_community_ids:
+        # Safely get metrics using .get(), providing default values if the community is inactive in this window
+        metrics = coin_metrics.get(comm_id, {
+            'node_count': 0, 'total_citations': 0, 'introspection': 0,
+            'inflow': 0, 'outflow': 0, 'introspection_ratio': 0,
+            'inflow_ratio': 0, 'outflow_ratio': 0, 'influence_score': 0
+        })
 
-            # New: Calculate growth rate
-            prev_size = prev_window_size[comm_id]
-            current_size = metrics['node_count']
-            # Calculate growth rate 
-            if prev_size > 0:
-                growth_rate = (current_size - prev_size) / prev_size
-            else:
-                growth_rate = 0  
-            
+        current_size = metrics['node_count']
+        
+        # Define community status
+        status = ''
+        if current_size >= 5:  # Active threshold
+            status = 'Active'
+            active_communities_count += 1
+        elif current_size > 0:
+            status = 'Latent'  # Dormant/budding
+        else:
+            status = 'Dormant'  # Inactive
 
-            temporal_data.append({
-                'community': comm_id,
-                'year_start': start_year,
-                'year_end': end_year,
-                'window_center': (start_year + end_year) / 2,
-                'node_count': metrics['node_count'],
-                'total_citations': metrics['total_citations'],
-                'introspection': metrics['introspection'],
-                'inflow': metrics['inflow'],
-                'outflow': metrics['outflow'],
-                'introspection_ratio': metrics['introspection_ratio'],
-                'inflow_ratio': metrics['inflow_ratio'],
-                'outflow_ratio': metrics['outflow_ratio'],
-                'influence_score': metrics['influence_score'],
-                'growth_rate': growth_rate
-            })
+        # Calculate growth rate
+        prev_size = prev_window_size[comm_id]
+        growth_rate = (current_size - prev_size) / prev_size if prev_size > 0 else 0.0
 
-            prev_window_size[comm_id] = current_size
-    
-    print(f"  Window {start_year}-{end_year}: {active_communities} active communities")
+        temporal_data.append({
+            'community': comm_id,
+            'year_start': start_year,
+            'year_end': end_year,
+            'window_center': (start_year + end_year) / 2,
+            'node_count': current_size,
+            'status': status,  
+            'total_citations': metrics['total_citations'],
+            'introspection': metrics['introspection'],
+            'inflow': metrics['inflow'],
+            'outflow': metrics['outflow'],
+            'introspection_ratio': metrics['introspection_ratio'],
+            'inflow_ratio': metrics['inflow_ratio'],
+            'outflow_ratio': metrics['outflow_ratio'],
+            'influence_score': metrics['influence_score'],
+            'growth_rate': growth_rate
+        })
+        
+        # Update previous window size
+        prev_window_size[comm_id] = current_size
+
+    print(f"  Window {start_year}-{end_year}: {active_communities_count} active communities")
 
 temporal_df = pd.DataFrame(temporal_data)
 print(f"Generated temporal analysis with {len(temporal_df)} data points")
@@ -618,35 +776,39 @@ print(bridge_df.head(5))
 # =============================================================================
 
 def classify_global_community(comm_data):
-    if len(comm_data) < 3:
-        return ['Insufficient Data']
+    # [Modified] Perform trend analysis only on active periods of the community
+    active_data = comm_data[comm_data['status'] == 'Active'].copy()
+
+    # If there are fewer than 3 active data points, long-term trends cannot be determined
+    if len(active_data) < 3:
+        if len(active_data) == 0:
+            return ['Peripheral']  # Edge community that was never active
+        return ['Insufficient Active Data']
     
-    # Calculate core metrics
-    time_points = comm_data['window_center'].values
-    papers = comm_data['node_count'].values
-    intro = comm_data['introspection_ratio'].values
-    outflow = comm_data['outflow_ratio'].values
+    # All subsequent calculations are based on active_data
+    time_points = active_data['window_center'].values
+    papers = active_data['node_count'].values
+    intro = active_data['introspection_ratio'].values
+    outflow = active_data['outflow_ratio'].values
     
-    # Use weighted least squares 
+    
     paper_slope = np.polyfit(time_points, papers, 1, w=np.sqrt(papers))[0]
     intro_slope = np.polyfit(time_points, intro, 1, w=np.sqrt(papers))[0]
     outflow_slope = np.polyfit(time_points, outflow, 1, w=np.sqrt(papers))[0]
     
-    # Calculate key ratios 
-    safe_ratio = lambda a, b: a/(b+1e-6)  # Avoid division by zero
+    safe_ratio = lambda a, b: a/(b+1e-6)
     avg_intro_outflow = np.mean([safe_ratio(i, o) for i, o in zip(intro, outflow)])
-    recent_ratio = safe_ratio(intro[-1], outflow[-1])
     
     # Core role classification
     classifications = []
     
-    if np.median(outflow) > 0.35 and np.median(intro) > 0.25:
+    if np.median(outflow) > 0.30 and np.median(intro) > 0.50:
         classifications.append('Exporter')
     
-    if np.median(comm_data['inflow_ratio']) > 0.35 and np.median(intro) < 0.35:
+    if np.median(active_data['inflow_ratio']) > 0.25 and np.median(intro) < 0.45:
         classifications.append('Hub')
     
-    if avg_intro_outflow > 1.4 or recent_ratio > 1.6:
+    if avg_intro_outflow > 3.6:
         classifications.append('Insular')
     
     # Status classification
@@ -675,38 +837,52 @@ temporal_df['global_community'] = temporal_df['community'].map(
 
 
 def classify_single_window(window_data):
-    """Classify based on a single time window"""
+    """Classify based on a single time window, with status and size."""
+    status = window_data['status']
+    node_count = window_data['node_count']
+    
+    # 1. Handle inactive statuses
+    if status == 'Dormant':
+        return ['Dormant']
+    if status == 'Latent':
+        return ['Latent', 'Small']
+
+    # 2. Process active status
     classifications = []
     
-    # Get current window metrics
+    # Core role classification
     outflow_ratio = window_data['outflow_ratio']
     inflow_ratio = window_data['inflow_ratio']
     introspection_ratio = window_data['introspection_ratio']
-    growth_rate = window_data['growth_rate']
-    node_count = window_data['node_count']
     
     # 1. Role classification
     if outflow_ratio > 0.35 and introspection_ratio > 0.25:
         classifications.append('Exporter')
-    
-    if inflow_ratio > 0.35 and introspection_ratio < 0.35:
+    if inflow_ratio > 0.3 and introspection_ratio < 0.40:
         classifications.append('Hub')
-    
-    if introspection_ratio / (outflow_ratio + 1e-6) > 1.4:
+    if introspection_ratio / (outflow_ratio + 1e-6) > 4.0:
         classifications.append('Insular')
     
-    # 2. Growth status
+
+    # Growth status classification
+    growth_rate = window_data['growth_rate']
     if growth_rate > 0.3:
         classifications.append('Growing')
     elif growth_rate < -0.2:
         classifications.append('Declining')
-    
-    # 3. Size classification
-    if node_count < 10:
+
+    # Size classification
+    if node_count < 50:
         classifications.append('Small')
-    elif node_count > 100:
+    elif node_count < 300:
+        classifications.append('Medium')
+    else:
         classifications.append('Large')
-    
+        
+    # Add 'Stable' as default role if no core role identified
+    if not any(role in classifications for role in ['Exporter', 'Hub', 'Insular']):
+        classifications.insert(0, 'Stable')
+
     return classifications
 
 # Apply window-level classification (independent for each time window)
@@ -769,9 +945,15 @@ def plot_community_evolution(comm_id, comm_data):
     for pos_idx in range(len(comm_data)):
         row = comm_data.iloc[pos_idx]
         
+        # [Modified] Clean labels by removing redundant 'Active'
+        raw_label = '|'.join(classify_single_window(row))  # Ensure latest classification logic is used
+        label_parts = raw_label.split('|')
+        filtered_parts = [part for part in label_parts if part != 'Active']
+        clean_label = '|'.join(filtered_parts)
+        
         # Add window classification above data point
         ax2.annotate(
-            row['window_class'], 
+            clean_label,  # <-- Use cleaned label
             xy=(row['window_center'], row['node_count'] * 1.05),
             ha='center', 
             va='bottom',
@@ -797,11 +979,114 @@ def plot_community_evolution(comm_id, comm_data):
                     fontsize=8,
                     bbox=dict(boxstyle="round,pad=0.2", fc="yellow", alpha=0.5)
                 )
-    
+        
     plt.tight_layout()
     plt.savefig(f"results/community_{comm_id}_evolution.png", dpi=300, bbox_inches='tight')
     plt.close()
     print(f"Saved evolution plot for community {comm_id}")
+
+def plot_community_topic_evolution(comm_id, temporal_data, metadata_df):
+    """Plot the topic evolution for a community using a heatmap matrix"""
+    # Ensure data is sorted chronologically
+    comm_data = temporal_data.sort_values('window_center')
+    
+    # Collect keywords from all time windows
+    all_keywords = set()
+    topic_data = {}
+    
+    for _, row in comm_data.iterrows():
+        start_year = row['year_start']
+        end_year = row['year_end']
+        window_key = f"{start_year}-{end_year}"
+        
+        # Get papers in this community for current time window
+        window_paper_ids = [
+            pid for pid in comm_papers[comm_id]
+            if start_year <= paper_to_year.get(pid, -1) <= end_year
+        ]
+        
+        if len(window_paper_ids) < 5:  # Skip if too few papers
+            topic_data[window_key] = {}
+            continue
+        
+        # Extract text data
+        window_metadata = metadata_df[metadata_df['paper_id'].isin(window_paper_ids)]
+        texts = (window_metadata['title'] + " " + window_metadata['abstract']).tolist()
+        
+        # Extract keywords using TF-IDF (without topic modeling)
+        try:
+            vectorizer = TfidfVectorizer(
+                max_features=100,
+                stop_words='english',
+                ngram_range=(1, 2),
+                min_df=2,
+                max_df=0.8
+            )
+            tfidf_matrix = vectorizer.fit_transform(texts)
+            
+            # Get average TF-IDF scores for each keyword
+            feature_names = vectorizer.get_feature_names_out()
+            tfidf_scores = np.asarray(tfidf_matrix.mean(axis=0)).flatten()
+            
+            # Store keywords and their scores
+            window_topics = {}
+            for i, score in enumerate(tfidf_scores):
+                if score > 0.01:  # Only keep meaningful scores
+                    keyword = feature_names[i]
+                    window_topics[keyword] = score
+                    all_keywords.add(keyword)
+            
+            topic_data[window_key] = window_topics
+        except Exception as e:
+            print(f"Error extracting topics for community {comm_id} in {window_key}: {e}")
+            topic_data[window_key] = {}
+    
+    # Create heatmap matrix
+    all_keywords = sorted(all_keywords)  # Sort keywords
+    windows = sorted(topic_data.keys())  # Sort time windows
+    
+    # Create matrix: rows=keywords, columns=time windows
+    heatmap_matrix = np.zeros((len(all_keywords), len(windows)))
+    
+    for j, window in enumerate(windows):
+        window_topics = topic_data[window]
+        for i, keyword in enumerate(all_keywords):
+            if keyword in window_topics:
+                heatmap_matrix[i, j] = window_topics[keyword]
+    
+    # Keep only top 20 most important keywords (avoid clutter)
+    if len(all_keywords) > 20:
+        # Calculate total keyword importance score
+        keyword_scores = np.sum(heatmap_matrix, axis=1)
+        top_indices = np.argsort(keyword_scores)[-20:][::-1]
+        heatmap_matrix = heatmap_matrix[top_indices, :]
+        all_keywords = [all_keywords[i] for i in top_indices]
+    
+    # Create visualization
+    plt.figure(figsize=(12, 8))
+    
+    # Use seaborn to plot heatmap
+    ax = sns.heatmap(
+        heatmap_matrix,
+        cmap="YlGnBu",  # Yellow to blue gradient
+        linewidths=0.5,
+        linecolor="lightgray",
+        xticklabels=windows,
+        yticklabels=all_keywords,
+        cbar_kws={'label': 'Keyword Importance (TF-IDF)'}
+    )
+    
+    # Set title and labels
+    plt.title(f"Topic Evolution in Community {comm_id}", fontsize=14)
+    plt.xlabel("Time Window", fontsize=12)
+    plt.ylabel("Keywords", fontsize=12)
+    plt.xticks(rotation=45, ha='right')  # Rotate x-axis labels
+    
+    # Adjust layout
+    plt.tight_layout()
+    plt.savefig(f"results/community_{comm_id}_topic_evolution.png", dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"Saved topic evolution plot for community {comm_id}")
 
 
 # 2. Community role distribution analysis
@@ -870,96 +1155,114 @@ def analyze_growth_patterns(temporal_df):
     
     growth_features['growth_pattern'] = growth_features.apply(classify_growth, axis=1)
     
-    # Plot growth pattern distribution
-    plt.figure(figsize=(10, 6))
-    growth_features['growth_pattern'].value_counts().plot(
-        kind='pie', autopct='%1.1f%%', 
-        colors=['#66c2a5', '#fc8d62', '#8da0cb', '#e78ac3', '#a6d854'],
-        startangle=90
+    # Calculate the number of communities for each growth pattern and sort in descending order
+    pattern_counts = growth_features['growth_pattern'].value_counts().sort_values(ascending=False)
+
+    # Create a horizontal bar plot using Seaborn for better aesthetics
+    plt.figure(figsize=(12, 8))
+    ax = sns.barplot(
+        x=pattern_counts.values, 
+        y=pattern_counts.index, 
+        hue=pattern_counts.index,  # Assign y-axis variable to hue
+        palette='viridis', 
+        orient='h',
+        legend=False  # Turn off automatic legend from hue
     )
-    plt.title('Community Growth Patterns')
-    plt.ylabel('')
+
+    plt.title('Distribution of Community Growth Patterns', fontsize=16)
+    plt.xlabel('Number of Communities', fontsize=12)
+    plt.ylabel('Growth Pattern', fontsize=12)
+
+    # Add count and percentage labels to each bar
+    total_communities = len(growth_features)
+    for i, count in enumerate(pattern_counts.values):
+        label_text = f' {count} ({count / total_communities:.1%})'
+        ax.text(count, i, label_text, color='black', va='center', ha='left')
+
+    plt.xlim(0, pattern_counts.max() * 1.2)  # Set x-axis limit with padding
+    plt.grid(axis='x', linestyle='--', alpha=0.6)  # Add grid lines on x-axis
     plt.tight_layout()
     plt.savefig("results/growth_patterns.png", dpi=300)
     plt.close()
-    print("Saved growth patterns plot")
-    
+    print("Saved growth patterns plot (as a bar chart)")
+
     return growth_features
 
 # 4. Stagnating community detection
-def detect_stagnating_communities(temporal_df):
-    """Detect stagnating communities"""
-    stagnating_comms = []
+def plot_emergence_disappearance_trends(temporal_df):
+    """
+    Analyze and visualize trends in community emergence and disappearance
+    """
+    # Prepare the data: sort by community and time window
+    df = temporal_df.sort_values(['community', 'window_center']).copy()
     
-    for comm_id in temporal_df['community'].unique():
-        comm_data = temporal_df[temporal_df['community'] == comm_id].sort_values('window_center')
-        
-        # Check for stagnation periods
-        if 'Stagnating' in comm_data['global_community'].values:
-            # Get stagnation start year
-            stagnating_windows = comm_data[comm_data['global_community'].str.contains('Stagnating')]
-            start_year = stagnating_windows['year_start'].min()
-            
-            stagnating_comms.append({
-                'community': comm_id,
-                'stagnation_start': start_year,
-                'duration': len(stagnating_windows),
-                'mean_introspection': stagnating_windows['introspection_ratio'].mean(),
-                'mean_outflow': stagnating_windows['outflow_ratio'].mean()
-            })
+    # Create a column for previous status to detect transitions
+    df['prev_status'] = df.groupby('community')['status'].shift(1)
+    df.dropna(subset=['prev_status'], inplace=True)  # Remove rows without previous status
     
-    # Convert to DataFrame
-    if stagnating_comms:
-        stagnating_df = pd.DataFrame(stagnating_comms)
-        
-        # Visualize characteristics of stagnating communities
-        plt.figure(figsize=(10, 6))
-        plt.scatter(
-            stagnating_df['mean_introspection'], 
-            stagnating_df['mean_outflow'],
-            s=stagnating_df['duration']*20,
-            c=stagnating_df['stagnation_start'],
-            cmap='viridis',
-            alpha=0.7
-        )
-        plt.colorbar(label='Start Year')
-        plt.xlabel('Mean Introspection Ratio')
-        plt.ylabel('Mean Outflow Ratio')
-        plt.title('Characteristics of Stagnating Communities')
-        plt.grid(True, linestyle='--', alpha=0.5)
-        plt.tight_layout()
-        plt.savefig("results/stagnating_communities.png", dpi=300)
-        plt.close()
-        print("Saved stagnating communities plot")
-        
-        return stagnating_df
-    else:
-        print("No stagnating communities detected")
-        return pd.DataFrame()
+    # Identify emerging and disappearing communities
+    is_emerging = (df['prev_status'] != 'Active') & (df['status'] == 'Active')
+    is_disappearing = (df['prev_status'] == 'Active') & (df['status'] != 'Active')
+    
+    # Create count columns for aggregation
+    df['emerging_count'] = is_emerging.astype(int)
+    df['disappearing_count'] = is_disappearing.astype(int)
+    
+    # Aggregate counts by time window
+    trends = df.groupby('window_center')[['emerging_count', 'disappearing_count']].sum()
+    
+    # Create the visualization
+    plt.figure(figsize=(14, 7))
+    plt.plot(trends.index, trends['emerging_count'], 'o-', label='Emerging Communities', color='green')
+    plt.plot(trends.index, trends['disappearing_count'], 's--', label='Disappearing Communities', color='red')
+    
+    plt.title('Macro Trends: Emergence and Disappearance of Communities Over Time', fontsize=16)
+    plt.xlabel('Year')
+    plt.ylabel('Number of Communities')
+    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.legend()
+    plt.tight_layout()
+    
+    # Save the plot
+    plt.savefig("results/community_macro_trends.png", dpi=300)
+    plt.close()
+    print("Saved community macro trends plot")
+
     
 # 5. Knowledge flow analysis
 def analyze_knowledge_flow(temporal_df):
-    """Analyze knowledge flow patterns"""
-    # Create knowledge flow matrix
-    flow_matrix = temporal_df.pivot_table(
+    """Analyze knowledge flow patterns for ACTIVE communities."""
+    
+    # [New] Filter to include only data points from active periods
+    active_flow_df = temporal_df[temporal_df['status'] == 'Active'].copy()
+
+    # If no active communities exist, skip visualization
+    if active_flow_df.empty:
+        print("No active communities to analyze for knowledge flow clustermap. Skipping.")
+        return pd.DataFrame()  # Return an empty DataFrame
+
+    # [Modified] Create knowledge flow matrix using filtered data
+    flow_matrix = active_flow_df.pivot_table(
         index='community',
         columns='window_center',
         values='outflow_ratio',
         fill_value=0
     )
     
-    # Cluster analysis
+    # Cluster analysis (subsequent code remains unchanged)
+    # Set appropriate height to prevent label overlap
+    figsize_height = max(10, len(flow_matrix.index) * 0.4) 
     sns.clustermap(
         flow_matrix, 
         cmap='coolwarm',
-        figsize=(12, 10),
+        figsize=(12, figsize_height),
         standard_scale=1  # Standardize by row
     )
-    plt.title('Knowledge Flow Patterns Across Communities')
+    plt.title('Knowledge Flow Patterns Across ACTIVE Communities')  # Updated title
     plt.tight_layout()
     plt.savefig("results/knowledge_flow_clustermap.png", dpi=300)
     plt.close()
-    print("Saved knowledge flow clustermap")
+    print("Saved knowledge flow clustermap for active communities")
     
     return flow_matrix
 
@@ -1011,6 +1314,95 @@ def visualize_cross_community_flow(flow_matrix, comm_ids, comm_topics, filename)
     print(f"Saved cross-community flow visualization: {filename}")
 
 
+def plot_community_state_distribution(temporal_df):
+    """
+    Visualize the distribution of Active, Latent, and Dormant communities over time using a stacked area chart.
+    """
+    # 1. Count communities per status in each time window
+    state_counts = temporal_df.groupby(['window_center', 'status']).size().unstack(fill_value=0)
+    
+    # 2. Ensure column order for better readability
+    state_counts = state_counts[['Dormant', 'Latent', 'Active']]
+    
+    # 3. Create stacked area plot
+    plt.figure(figsize=(14, 8))
+    plt.stackplot(
+        state_counts.index, 
+        state_counts['Dormant'], 
+        state_counts['Latent'], 
+        state_counts['Active'], 
+        labels=['Dormant', 'Latent', 'Active'],
+        colors=['#B0C4DE', '#FFD700', '#2E8B57']  # LightSteelBlue, Gold, SeaGreen
+    )
+    
+    plt.title('Distribution of Community States Over Time', fontsize=16)
+    plt.xlabel('Year')
+    plt.ylabel('Number of Communities')
+    plt.legend(loc='upper left')
+    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.xlim(state_counts.index.min(), state_counts.index.max())
+    plt.tight_layout()
+    plt.savefig("results/community_state_distribution.png", dpi=300)
+    plt.close()
+    print("Saved community state distribution plot (stacked area chart).")
+
+
+def plot_community_lifecycle_heatmap(temporal_df):
+    """
+    Visualize the lifecycle of each community using a heatmap to track state changes over time.
+    """
+    # 1. Map categorical states to numerical values for visualization
+    status_map = {'Dormant': 0, 'Latent': 1, 'Active': 2}
+    df = temporal_df.copy()
+    df['status_numeric'] = df['status'].map(status_map)
+    
+    # 2. Create pivot table: communities as rows, time windows as columns
+    lifecycle_matrix = df.pivot_table(
+        index='community', 
+        columns='window_center', 
+        values='status_numeric'
+    )
+    
+    # 3. [Key] Sort communities to create a structured visualization
+    # Calculate each community's highest status for primary sorting
+    lifecycle_matrix['max_status'] = lifecycle_matrix.max(axis=1)
+    # Calculate active duration as secondary sort criterion
+    lifecycle_matrix['active_duration'] = (lifecycle_matrix > 0).sum(axis=1)
+    # Sort by highest status then active duration (both descending)
+    lifecycle_matrix.sort_values(
+        by=['max_status', 'active_duration'], 
+        ascending=[False, False], 
+        inplace=True
+    )
+    # Remove temporary sorting columns
+    lifecycle_matrix.drop(columns=['max_status', 'active_duration'], inplace=True)
+
+    # 4. Create heatmap visualization
+    # Dynamically adjust height to prevent Y-axis label overlap
+    figsize_height = max(10, len(lifecycle_matrix.index) * 0.1)
+    plt.figure(figsize=(20, figsize_height))
+    
+    ax = sns.heatmap(
+        lifecycle_matrix,
+        cmap=['#B0C4DE', '#FFD700', '#2E8B57'],  # Consistent colors with state distribution
+        linewidths=.5,
+        cbar_kws={'ticks': [0, 1, 2], 'shrink': 0.3}  # Set colorbar ticks
+    )
+    
+    # Customize colorbar labels
+    cbar = ax.collections[0].colorbar
+    cbar.set_ticklabels(['Dormant', 'Latent', 'Active'])
+
+    plt.title('Lifecycle of Each Community Over Time', fontsize=16)
+    plt.xlabel('Year')
+    plt.ylabel('Community ID (Sorted by Activity Level)')
+    plt.yticks(rotation=0, fontsize=8)  # Display Y-axis labels horizontally
+    
+    plt.tight_layout()
+    plt.savefig("results/community_lifecycle_heatmap.png", dpi=300)
+    plt.close()
+    print("Saved community lifecycle heatmap.")
+
 # Analyze knowledge absorption in emerging fields
 if 'emerging_comms' not in locals():
     emerging_comms = []
@@ -1026,43 +1418,60 @@ for comm_id in temporal_df['community'].unique():
         if late_growth and high_inflow:
             emerging_comms.append(comm_id)
 
+df_sorted = temporal_df.sort_values(['community', 'window_center']).copy()
+df_sorted['prev_status'] = df_sorted.groupby('community')['status'].shift(1)
+df_sorted.dropna(subset=['prev_status'], inplace=True)
+
+emerging_events = df_sorted[
+    (df_sorted['prev_status'] != 'Active') & (df_sorted['status'] == 'Active')
+]
+emerging_comm_ids = emerging_events['community'].unique()
+
+
 # Analyze knowledge sources for emerging communities
 emerging_analysis = []
-for comm_id in emerging_comms:
-    comm_idx = comm_ids.index(comm_id)
-    inflows = flow_matrix[:, comm_idx]  # All citations to this community
-    
-    # Identify main knowledge sources
-    top_sources = []
-    for src_idx, count in enumerate(inflows):
-        if count > 0:
-            source_comm = comm_ids[src_idx]
-            source_name = '|'.join(comm_topics.get(source_comm, {}).get('community_keywords', [])[:2])
-            top_sources.append((source_name, count))
-    
-    # Sort by citation count
-    top_sources.sort(key=lambda x: x[1], reverse=True)
-    
-    emerging_analysis.append({
-        'emerging_community': comm_id,
-        'emerging_name': '|'.join(comm_topics.get(comm_id, {}).get('community_keywords', [])[:2]),
-        'main_sources': '; '.join([f"{name}({count})" for name, count in top_sources[:3]]),
-        'total_inflow': sum(inflows)
-    })
+if len(emerging_comm_ids) > 0:
+    print(f"\nAnalyzing knowledge sources for {len(emerging_comm_ids)} emerging communities...")
+    # Get the full cross-community knowledge flow matrix
+    flow_matrix, comm_ids = build_cross_community_flow(G, comms)
+    # Create reverse lookup dictionary for community IDs
+    comm_id_to_index = {cid: i for i, cid in enumerate(comm_ids)}
 
-# Save emerging field analysis
+    for comm_id in emerging_comm_ids:
+        if comm_id not in comm_id_to_index: 
+            continue  # Skip if community not in flow matrix
+            
+        comm_idx = comm_id_to_index[comm_id]
+        # Get all incoming citations to this community from the matrix
+        inflows = flow_matrix[:, comm_idx]
+
+        # Identify main knowledge sources
+        top_sources = []
+        for src_idx, count in enumerate(inflows):
+            if count > 0:
+                source_comm = comm_ids[src_idx]
+                # Get top 2 keywords as source name
+                source_name = '|'.join(comm_topics.get(source_comm, {}).get('community_keywords', [])[:2])
+                top_sources.append((source_name, count))
+        
+        # Sort sources by citation count descending
+        top_sources.sort(key=lambda x: x[1], reverse=True)
+        
+        emerging_analysis.append({
+            'emerging_community': comm_id,
+            'emerging_name': '|'.join(comm_topics.get(comm_id, {}).get('community_keywords', [])[:2]),
+            'main_sources': '; '.join([f"{name}({count})" for name, count in top_sources[:3]]),  # Top 3 sources
+            'total_inflow': sum(inflows)  # Total incoming citations
+        })
+
+# Save analysis results
 emerging_df = pd.DataFrame(emerging_analysis)
 if not emerging_df.empty:
     emerging_df.to_csv("results/emerging_communities.csv", index=False)
-    print(f"\nIdentified {len(emerging_df)} emerging communities")
+    print(f"\nIdentified and analyzed {len(emerging_df)} emerging communities.")
 else:
-    print("\nNo emerging communities identified based on criteria")
+    print("\nNo emerging communities identified based on the new criteria.")
 
-
-# Create results directory if it doesn't exist
-if not os.path.exists("results"):
-    os.makedirs("results")
-    print("Created results directory")
 
 # Save bridge community results
 bridge_df.to_csv("results/bridge_communities.csv", index=False)
@@ -1081,7 +1490,10 @@ if 'temporal_df' in locals() and not temporal_df.empty:
     growth_features = analyze_growth_patterns(temporal_df)
     
     # Detect stagnating communities
-    stagnating_df = detect_stagnating_communities(temporal_df)
+    plot_emergence_disappearance_trends(temporal_df)
+
+    plot_community_state_distribution(temporal_df)
+    plot_community_lifecycle_heatmap(temporal_df)
     
     # Analyze knowledge flow
     flow_matrix = analyze_knowledge_flow(temporal_df)
@@ -1091,6 +1503,7 @@ if 'temporal_df' in locals() and not temporal_df.empty:
     for comm_id in top_communities:
         comm_data = temporal_df[temporal_df['community'] == comm_id]
         plot_community_evolution(comm_id, comm_data)
+        plot_community_topic_evolution(comm_id, comm_data, metadata_df)
 
     # Generate analysis report
     print("\n" + "="*60)
@@ -1098,10 +1511,6 @@ if 'temporal_df' in locals() and not temporal_df.empty:
     print("="*60)
     print(f"Total communities analyzed: {temporal_df['community'].nunique()}")
     print(f"Time windows covered: {temporal_df['window_center'].nunique()}")
-    
-    if not stagnating_df.empty:
-        print(f"\nDetected {len(stagnating_df)} stagnating communities")
-        print("Longest stagnation duration:", stagnating_df['duration'].max(), "years")
     
     print("\nGrowth pattern distribution:")
     print(growth_features['growth_pattern'].value_counts())
@@ -1126,8 +1535,6 @@ if 'temporal_df' in locals() and not temporal_df.empty:
     # Save analysis results
     temporal_df.to_csv("results/community_evolution.csv", index=False)
     growth_features.to_csv("results/growth_patterns.csv", index=False)
-    if not stagnating_df.empty:
-        stagnating_df.to_csv("results/stagnating_communities.csv", index=False)
     
     print("Saved analysis results to CSV files")
 else:

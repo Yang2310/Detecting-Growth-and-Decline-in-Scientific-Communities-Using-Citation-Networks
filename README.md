@@ -2,6 +2,8 @@
 
 A modular Python analysis pipeline for detecting, tracking, and interpreting scientific communities in a citation network.
 
+**English** | [简体中文](README.zh-CN.md)
+
 This project originated as my MSc thesis at the University of Galway. I built the full analysis workflow from raw citation and paper metadata through network construction, community detection, temporal analysis, topic modeling, classification, and visualization.
 
 ## What I Built

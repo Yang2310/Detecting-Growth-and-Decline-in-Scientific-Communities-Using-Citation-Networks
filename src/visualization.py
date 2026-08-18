@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import networkx as nx
 import numpy as np
 import pandas as pd
 import seaborn as sns
@@ -27,7 +28,7 @@ def plot_network_statistics(graph, output_dir: str | Path = "results"):
     plt.ylabel("Frequency (log)")
     plt.title("Citation In-degree Distribution")
 
-    self_loops = graph.number_of_edges() and sum(1 for _ in graph.selfloop_edges()) if hasattr(graph, "selfloop_edges") else 0
+    self_loops = nx.number_of_selfloops(graph)
     total_edges = graph.number_of_edges()
     plt.subplot(133)
     plt.pie(

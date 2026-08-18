@@ -1,0 +1,8 @@
+pandas
+numpy
+networkx
+matplotlib
+seaborn
+python-igraph
+leidenalg
+scikit-learn

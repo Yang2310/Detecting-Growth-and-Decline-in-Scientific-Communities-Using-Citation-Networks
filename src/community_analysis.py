@@ -49,50 +49,63 @@ def extract_community_topics(
 ):
     """Extract representative topic keywords for a community with TF-IDF + LDA."""
     if len(paper_ids) < 10:
+        print(
+            f"  Community {community_id}: Too few papers ({len(paper_ids)}) "
+            "for topic analysis"
+        )
         return None
 
     community_metadata = metadata[metadata["paper_id"].isin(paper_ids)]
     texts = (community_metadata["title"] + " " + community_metadata["abstract"]).tolist()
 
-    vectorizer = TfidfVectorizer(
-        max_features=500,
-        stop_words="english",
-        ngram_range=(1, 2),
-        min_df=2,
-        max_df=0.8,
-    )
-    tfidf_matrix = vectorizer.fit_transform(texts)
-    feature_names = vectorizer.get_feature_names_out()
+    try:
+        vectorizer = TfidfVectorizer(
+            max_features=500,
+            stop_words="english",
+            ngram_range=(1, 2),
+            min_df=2,
+            max_df=0.8,
+        )
+        tfidf_matrix = vectorizer.fit_transform(texts)
+        feature_names = vectorizer.get_feature_names_out()
 
-    n_topics_actual = min(n_topics, len(texts) // 5, 5)
-    n_topics_actual = max(2, n_topics_actual)
+        n_topics_actual = min(n_topics, len(texts) // 5, 5)
+        n_topics_actual = max(2, n_topics_actual)
 
-    lda = LatentDirichletAllocation(
-        n_components=n_topics_actual,
-        random_state=42,
-        max_iter=50,
-    )
-    lda.fit(tfidf_matrix)
+        lda = LatentDirichletAllocation(
+            n_components=n_topics_actual,
+            random_state=42,
+            max_iter=50,
+        )
+        lda.fit(tfidf_matrix)
 
-    topics = []
-    topic_weights = []
-    for topic in lda.components_:
-        top_indices = topic.argsort()[-8:][::-1]
-        topics.append([feature_names[i] for i in top_indices])
-        topic_weights.append([topic[i] for i in top_indices])
+        topics = []
+        topic_weights = []
+        for topic in lda.components_:
+            top_indices = topic.argsort()[-8:][::-1]
+            topics.append([feature_names[i] for i in top_indices])
+            topic_weights.append([topic[i] for i in top_indices])
 
-    all_keywords = [keyword for topic in topics for keyword in topic[:3]]
-    keyword_counts = Counter(all_keywords)
-    community_keywords = [word for word, _ in keyword_counts.most_common(8)]
+        all_keywords = [keyword for topic in topics for keyword in topic[:3]]
+        keyword_counts = Counter(all_keywords)
+        community_keywords = [word for word, _ in keyword_counts.most_common(8)]
 
-    return {
-        "community_id": community_id,
-        "topics": topics,
-        "topic_weights": topic_weights,
-        "community_keywords": community_keywords,
-        "keyword_counts": keyword_counts,
-        "num_papers": len(paper_ids),
-    }
+        print(
+            f"  Community {community_id}: {len(paper_ids)} papers, keywords: "
+            f"{', '.join(community_keywords[:4])}"
+        )
+
+        return {
+            "community_id": community_id,
+            "topics": topics,
+            "topic_weights": topic_weights,
+            "community_keywords": community_keywords,
+            "keyword_counts": keyword_counts,
+            "num_papers": len(paper_ids),
+        }
+    except Exception as exc:
+        print(f"  Error analyzing community {community_id}: {exc}")
+        return None
 
 
 def analyze_major_community_topics(
